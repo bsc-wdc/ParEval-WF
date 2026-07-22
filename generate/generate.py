@@ -11,13 +11,14 @@ import torch
 from transformers import pipeline
 
 # local imports
-from utils import BalancedBracketsCriteria, PromptDataset, clean_output, check_output_integrity, get_inference_config
+from utils import BalancedBracketsCriteria, PromptDataset, clean_output, check_output_integrity, get_inference_config, resolve_model_path
 
 
 """ Parse command line arguments """
 parser = argparse.ArgumentParser(description='Generate code')
 parser.add_argument('--prompts', required=True, help='Path to the prompt JSON file')
-parser.add_argument('--model', required=True, help='Path to the language model')
+parser.add_argument('--model', required=True, help='Model id (e.g. bigcode/starcoder2-15b), local dir, or absolute path')
+parser.add_argument('--model-subpath', default=None, help='Local subdir under a model root where the weights live, if not at <org>/<model>')
 parser.add_argument('--output', required=True, help='Path to the output JSON file')
 parser.add_argument('--restart', action='store_true', help='Restart generation from scratch (default: False)')
 parser.add_argument('--cache', help='JSONL file to cache intermediate results in. Will be restored from if it ' +
@@ -36,17 +37,16 @@ parser.add_argument('--prompted', action='store_true', help='Use prompted genera
 parser.add_argument('--hf_token', type=str, help='HuggingFace API token for loading models')
 args = parser.parse_args()
 
-local_model_path = os.path.join("..", "models", args.model)
+# Routing name (org/model) selects the inference config
+get_inference_model_path = "/".join(args.model.rstrip("/").split("/")[-2:])
 
-get_inference_model_path = args.model
-if os.path.isdir(local_model_path):
-    print(f"Found local model: {local_model_path}")
-    args.model = local_model_path
-    # Parse for longer absolute paths (e.g. store just deepseek-ai/deepseek-coder-6.7b-instruct)
-    get_inference_model_path = "/".join(args.model.split("/")[-2:])
+# Resolve the id to a local weights dir if we have one
+resolved_model = resolve_model_path(args.model, args.model_subpath)
+if resolved_model != args.model:
+    print(f"Resolved model '{args.model}' -> {resolved_model}")
 else:
-    print(f"Model not found at {local_model_path}")
-    print(f"   Attempting to load '{args.model}' from Hugging Face cache or absolute path.")
+    print(f"No local weights matched '{args.model}'. Using it as-is (absolute path or HF hub id).")
+args.model = resolved_model
 
 
 """ Load prompts """

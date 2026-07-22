@@ -64,6 +64,9 @@ module load sqlite3
 
 cd generate/
 
+# Load model search roots (not committed); see .env.example
+[ -f .env ] && source .env
+
 # Add fix for Mistral-Small-3.2-24B error (shouldn't hurt GPU performance)
 export OMP_NUM_THREADS=1
 
@@ -76,11 +79,13 @@ echo "OUTPUT:  $OUTPUT_DIR"
 echo "SAMPLES: $NUM_SAMPLES_PER_PROMPT"
 echo "TOKENS:  $MAX_NEW_TOKENS"
 
-while IFS= read -r model || [ -n "$model" ]; do
+while read -r model subpath || [ -n "$model" ]; do
     # Skip empty lines and comments
     [[ -z "$model" || "$model" == \#* ]] && continue
 
     model_name=$(basename "$model")
+    # Where the weights sit under a model root. Defaults to the id (<org>/<model>).
+    subpath="${subpath:-$model}"
 
     echo ""
     echo "============================================"
@@ -99,6 +104,7 @@ while IFS= read -r model || [ -n "$model" ]; do
     python3 generate-vllm.py \
         --prompts "$PROMPTS_FILE" \
         --model "$model" \
+        --model-subpath "$subpath" \
         --output "$output_file" \
         --num_samples_per_prompt "$NUM_SAMPLES_PER_PROMPT" \
         --max_new_tokens "$MAX_NEW_TOKENS" \

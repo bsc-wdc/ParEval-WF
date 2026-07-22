@@ -54,6 +54,11 @@ this turned on as it almost always improves the results.
 skipping models whose output already exists. `generate-all-api.sh` does the same
 for the API models. See the header of each script for its arguments.
 
+`models.txt` holds HuggingFace-style ids (one per line, with an optional local
+subpath as a second column). `resolve_model_path` in `utils.py` locates the
+weights under the roots set in `.env` (`PAREVAL_MODEL_ROOTS`; copy `.env.example`),
+falling back to the HF hub when none match.
+
 ## Adding New LLMs
 
 Since a number of the LLMs have different inference settings and prompt formats,

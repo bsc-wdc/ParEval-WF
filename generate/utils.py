@@ -1,5 +1,6 @@
 # std imports
 from abc import ABC, abstractmethod
+import os
 import re
 from typing import List
 
@@ -7,6 +8,64 @@ from typing import List
 import torch
 from torch.utils.data import Dataset
 from transformers import StoppingCriteria
+
+
+# Directories for local models from $PAREVAL_MODEL_ROOTS or generate/.env
+_MODEL_ROOTS_ENV = "PAREVAL_MODEL_ROOTS"
+_ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+_BUILTIN_ROOTS = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models")]
+
+
+def _read_roots_from_env_file(path: str):
+    """Read PAREVAL_MODEL_ROOTS from a sourceable env file, or None."""
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if line.startswith("#") or _MODEL_ROOTS_ENV not in line:
+            continue
+        _, _, val = line.partition("=")  # tolerate 'export VAR=...' and 'VAR=...'
+        val = val.strip().strip('"').strip("'")
+        if val:
+            return val
+    return None
+
+
+def get_model_roots() -> List[str]:
+    """Ordered list of directories to search for local model weights."""
+    val = os.environ.get(_MODEL_ROOTS_ENV) or _read_roots_from_env_file(_ENV_FILE)
+    roots = [r for r in (val.split(os.pathsep) if val else []) if r]
+    return roots + _BUILTIN_ROOTS
+
+
+def _looks_like_model_dir(path: str) -> bool:
+    return os.path.isfile(os.path.join(path, "config.json"))
+
+
+def resolve_model_path(model_id: str, subpath: str = None, roots=None) -> str:
+    """Map a model id to a local weights directory by checking each search root.
+
+    For each root, looks for `<root>/<subpath or model_id>` and returns the first
+    that exists. `subpath` is the on-disk location for models not stored at
+    `<org>/<model>` (e.g. id 'Qwen/Qwen3-32B' living at 'Qwen/Qwen3/Qwen3-32B').
+
+    Only stats fully-qualified paths, so it works with traverse-only permissions
+    on shared roots and never lists a directory. Never raises: if nothing
+    matches, returns model_id unchanged for the caller to fetch from the HF hub.
+    """
+    if os.path.isdir(model_id):  # already an absolute or local dir
+        return model_id
+
+    rel = subpath or model_id
+    for root in (roots if roots is not None else get_model_roots()):
+        candidate = os.path.join(root, rel)
+        if _looks_like_model_dir(candidate):
+            return candidate
+    return model_id
+
 
 def _is_python_prompt(prompt: str) -> bool:
     p = prompt.lower()

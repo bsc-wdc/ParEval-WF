@@ -1,4 +1,55 @@
-# ParEval
+# ParEval-WF: Task-Based Parallel Code Generation
+
+This repository extends the [ParEval](https://github.com/parallelcodefoundry/ParEval)
+benchmark to **task-based parallel programming models**, demonstrated on
+[**PyCOMPSs**](https://compss.bsc.es).
+
+While the original ParEval evaluates LLM-generated **C++ kernel** parallelism
+(OpenMP, MPI, Kokkos, CUDA), this fork evaluates whether LLMs can generate
+correct and efficient **task-based** parallel code, where parallelism is
+expressed across functions rather than through in-function annotations.
+
+## What this fork adds
+
+- A **Python execution backend** for evaluating LLM-generated task-based code
+  (`drivers/python/`), currently targeting PyCOMPSs but extensible to other
+  Python-based models.
+- A **multi-tier prompt set** ranging from bare kernel prompts to
+  infrastructure-aware workflow prompts. This work evaluates Tiers 0 and 1
+  (`prompts/`).
+- **Analysis scripts** reproducing the correctness, failure-mode, and
+  performance results in the paper (`analysis/`).
+
+## Reproducing the study
+
+The pipeline has four stages:
+
+1. **Prompt construction** — `prompts/generate-pycompss-prompts.py` builds the
+   Tier-0 and Tier-1 prompt sets.
+2. **Generation** — `generate/generate-all.sh` (open-weight, via vLLM) and
+   `generate/generate-all-api.sh` (commercial models) produce completions in
+   `generate/output/`.
+3. **Evaluation** — `drivers/run-all-models-slurm-parallel.sh` (correctness) and
+   `drivers/run-all-models-slurm-scaling.sh` (scaling) run the PyCOMPSs driver.
+4. **Analysis** — `analysis/run_analysis_all.sh` computes pass@k, speedup, and
+   efficiency and generates the figures and tables.
+
+### PyCOMPSs setup
+
+In addition to the base dependencies below, the task-based pipeline requires:
+
+- [PyCOMPSs](https://compss-doc.readthedocs.io/en/3.4/) 3.4.post2603
+
+Open-weight models are served locally with vLLM on GPU nodes; commercial models
+are queried through their provider APIs (set the relevant API keys as
+environment variables).
+
+---
+
+# Original ParEval
+
+The sections below document the upstream ParEval benchmark, on which this work
+builds.
 
 [![HPDC 2024](https://img.shields.io/badge/Paper-HPDC'24-e87053.svg?style=flat)](https://pssg.cs.umd.edu/assets/papers/2024-06-pareval-hpdc.pdf)&nbsp;[![arXiv](https://img.shields.io/badge/arXiv-2401.12554-b31b1b.svg)](https://arxiv.org/abs/2401.12554)&nbsp;[![GitHub license](https://badgen.net/github/license/parallelcodefoundry/ParEval)](https://github.com/parallelcodefoundry/ParEval/blob/develop/LICENSE)
 

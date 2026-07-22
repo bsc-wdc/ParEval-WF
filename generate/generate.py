@@ -11,7 +11,7 @@ import torch
 from transformers import pipeline
 
 # local imports
-from utils import BalancedBracketsCriteria, PromptDataset, clean_output, get_inference_config
+from utils import BalancedBracketsCriteria, PromptDataset, clean_output, check_output_integrity, get_inference_config
 
 
 """ Parse command line arguments """
@@ -30,11 +30,24 @@ parser.add_argument('--max_new_tokens', type=int, default=1024, help='Maximum nu
 parser.add_argument('--num_samples_per_prompt', type=int, default=50, help='Number of code samples to generate (default: 50)')
 parser.add_argument('--temperature', type=float, default=0.2, help='Temperature for controlling randomness (default: 0.2)')
 parser.add_argument('--top_p', type=float, default=0.95, help='Top p value for nucleus sampling (default: 0.95)')
-parser.add_argument('--do_sample', action='store_true', help='Enable sampling (default: False)')
+parser.add_argument('--do_sample', action=argparse.BooleanOptionalAction, default=True, help='Enable sampling (default: True)')
 parser.add_argument('--batch_size', type=int, default=16, help='Batch size for generation (default: 8)')
 parser.add_argument('--prompted', action='store_true', help='Use prompted generation. See StarCoder paper (default: False)')
 parser.add_argument('--hf_token', type=str, help='HuggingFace API token for loading models')
 args = parser.parse_args()
+
+local_model_path = os.path.join("..", "models", args.model)
+
+get_inference_model_path = args.model
+if os.path.isdir(local_model_path):
+    print(f"Found local model: {local_model_path}")
+    args.model = local_model_path
+    # Parse for longer absolute paths (e.g. store just deepseek-ai/deepseek-coder-6.7b-instruct)
+    get_inference_model_path = "/".join(args.model.split("/")[-2:])
+else:
+    print(f"Model not found at {local_model_path}")
+    print(f"   Attempting to load '{args.model}' from Hugging Face cache or absolute path.")
+
 
 """ Load prompts """
 with open(args.prompts, 'r') as json_file:
@@ -91,7 +104,7 @@ if not args.restart and args.restore_from and os.path.exists(args.restore_from):
 
 
 """ Initialize inference config """
-inference_config = get_inference_config(args.model, prompted=args.prompted)
+inference_config = get_inference_config(get_inference_model_path, prompted=args.prompted)
 
 # to use a torch.utils.data.DataSet with the HuggingFace pipeline, we need to flatten out the prompts
 # and repeat them for however many samples we want to generate per prompt
@@ -129,7 +142,9 @@ total_tokens = 0
 for idx, (prompt, output) in tqdm(enumerate(zip(prompts_repeated, generated_outputs)), total=len(prompts_repeated), desc="Generating code", file=sys.stdout):
     if idx % args.num_samples_per_prompt == 0:
         cur_prompt = prompt.copy()
-        cur_prompt.update({"temperature": args.temperature, "top_p": args.top_p, "do_sample": args.do_sample, "max_new_tokens": args.max_new_tokens, "prompted": args.prompted})
+        actual_temperature = args.temperature if args.do_sample else 0.0
+        actual_top_p = args.top_p if args.do_sample else 1.0
+        cur_prompt.update({"temperature": actual_temperature, "top_p": actual_top_p, "do_sample": args.do_sample, "max_new_tokens": args.max_new_tokens, "prompted": args.prompted})
         cur_prompt["outputs"] = []
         cur_prompt["raw_outputs"] = []
         prompt_str = cur_prompt["prompt"]
@@ -156,3 +171,5 @@ print(f"Generated {len(responses)} code samples in {end_time - start_time:.2f} s
 """ Save responses to JSON file """
 with open(args.output, 'w') as output_file:
     json.dump(responses, output_file, indent=4)
+
+check_output_integrity(responses)

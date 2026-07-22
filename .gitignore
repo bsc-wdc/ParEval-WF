@@ -1,16 +1,34 @@
-# local
-.vscode
+# IDE management
+.idea/
+*.code-workspace
+.vscode/
+.venv*
+venv*
 
 # python
 *.pyc
-__pycache__
+**/__pycache__/
 .env
 
 # cpp
 *.out
+*.err
 *.exe
 a.out
 *.o
 
 # editor buffers
 *~
+
+generate/**/*.json
+prompts/**/*.json
+**/logs/
+
+# local data
+/models
+generate/audit-report.md
+scratch/
+**/artifacts/
+**/outputs/
+**/plots/
+*.xml

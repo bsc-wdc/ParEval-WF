@@ -65,11 +65,15 @@ def main():
                     "did_build": output["did_build"],
                     "is_source_valid": output["is_source_valid"],
                     "best_sequential_runtime": output["best_sequential_runtime"],
-                    "output_idx": output_idx
+                    "relaxation_used": False,
+                    "output_idx": output_idx,
+                    "num_threads": None,
+                    "num_procs": None
                 }
                 rows.append(row)
                 continue
 
+            relaxation_used = bool(output.get("relaxations_applied"))
             for run_idx, run in enumerate(output["runs"]):
                 row = {
                     "prompt": prompt["prompt"],
@@ -86,8 +90,11 @@ def main():
                     "did_build": output["did_build"],
                     "is_source_valid": output["is_source_valid"],
                     "best_sequential_runtime": output["best_sequential_runtime"],
+                    "relaxation_used": relaxation_used,
                     "output_idx": output_idx,
                     "run_idx": run_idx,
+                    "num_threads": run.get("num_threads", None),
+                    "num_procs": run.get("num_procs", None),
                     **run
                 }
                 rows.append(row)

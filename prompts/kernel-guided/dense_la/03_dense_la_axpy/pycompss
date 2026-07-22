@@ -1,0 +1,16 @@
+"""
+Compute z = alpha*x+y where x and y are vectors. Store the result in z.
+  Use PyCOMPSs to compute in parallel.
+  Imports: Include all necessary PyCOMPSs imports (e.g., @task, compss_wait_on).
+  Parallelization: Use one or more @task decorated functions to handle the computation.
+  Orchestration: Provide a main(alpha, x, y) function that distributes the work and manages task dependencies.
+  Synchronization: The main(alpha, x, y) function must explicitly wait for all tasks to complete.
+  Return Type: Return a standard Python list of floats representing the resulting vector 'z' (ensure it is the final synchronized result, not a list of futures).
+  Provide your complete solution in a single Python code block.
+
+Example:
+   
+   input: x=[1, -5, 2, 9] y=[0, 4, 1, -1] alpha=2
+   output: z=[2, -6, 5, 17]
+
+"""

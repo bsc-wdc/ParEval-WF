@@ -1,0 +1,16 @@
+"""
+Return the distance between the closest two elements in the vector x.
+  Use PyCOMPSs to compute in parallel.
+  Imports: Include all necessary PyCOMPSs imports (e.g., @task, compss_wait_on).
+  Parallelization: Use one or more @task decorated functions to handle the computation.
+  Orchestration: Provide a main(points) function that distributes the work and manages task dependencies.
+  Synchronization: The main(points) function must explicitly wait for all tasks to complete.
+  Return Type: Return a standard Python float representing the minimum distance (ensure it is the final synchronized result, not a future).
+  Provide your complete solution in a single Python code block.
+
+Example:
+
+   input: [7, 3, 9, 12, 31, 1]
+   output: 2
+
+"""

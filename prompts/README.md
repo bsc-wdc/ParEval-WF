@@ -3,6 +3,9 @@
 This directory contains the ParEval prompts.
 The prompts for the generation task are contained in `generation-prompts.json`
 and the prompts for the translation task are in `translation-prompts.json`.
+Prompts exist for several parallelism models (`serial`, `omp`, `cuda`,
+`pycompss`, ...); the per-model source files live under `kernel/`, `kernel-guided/`,
+and `translate/` and are gathered into the composed JSON files above.
 
 
 The format of the prompts dataset is as follows:
@@ -21,6 +24,12 @@ The format of the prompts dataset is as follows:
 ```
 
 ## Other Utilities
+
+`gather-raw-prompts.py` -- gather the raw per-model source files into a single
+composed JSON in the correct format.
+
+`generate-pycompss-prompts.py` / `generate-python-serial-prompts.py` -- derive
+the `pycompss` and `serial-python` source files from the `omp` ones.
 
 `create-serial-tests.py` -- this script will parse out the sequential baselines
 for each problem from the drivers and create a "fake" output file with these

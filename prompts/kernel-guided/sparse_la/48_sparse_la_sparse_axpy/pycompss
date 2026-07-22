@@ -1,0 +1,16 @@
+"""
+Compute z = alpha*x+y where x and y are sparse vectors. Store the result in the dense vector z.
+  Use PyCOMPSs to compute in parallel.
+  Imports: Include all necessary PyCOMPSs imports (e.g., @task, compss_wait_on).
+  Parallelization: Use one or more @task decorated functions to handle the computation.
+  Orchestration: Provide a main(alpha, x, y, N) function that distributes the work and manages task dependencies.
+  Synchronization: The main function must explicitly wait for all tasks to complete before returning the final dense list.
+  Return Type: Return a standard Python list of 'N' floats representing the dense vector 'z' (ensure it is the final synchronized result).
+  Provide your complete solution in a single Python code block.
+
+Example:
+   
+   input: x=[(5, 12), (8, 3), (12, -1)], y=[(3, 1), (5, -2), (7, 1), (8, -3)], alpha=1
+   output: z=[0, 0, 0, 1, 0, 10, 0, 1, 0, 0, 0, 0, -1]
+
+"""

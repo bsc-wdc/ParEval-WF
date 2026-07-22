@@ -1,43 +1,89 @@
 # std imports
 from abc import ABC, abstractmethod
 import re
+from typing import List
 
 # tpl imports
 import torch
 from torch.utils.data import Dataset
 from transformers import StoppingCriteria
 
+def _is_python_prompt(prompt: str) -> bool:
+    p = prompt.lower()
+    return "pycompss" in p or "python" in p
 
-def clean_output(output : str, prompt : str) -> str:
-    """ Remove `prompt` from the begging of `output`.
-        Also truncate at the end of the function definition (i.e. matching closing brace).
+def extract_pycompss_solution(code: str) -> str:
     """
-    # replace up to the end of the first instance of prompt
+    Extracts Python module code from a model-generated string.
+
+    Hard stops (break): `if __name__` lines, and lines starting with `<`
+    (EOS/turn tokens from any model family: </s>, <s>[INST], <|im_end|>, etc.).
+    Bare module-level function calls (print(), init()) are skipped as before.
+
+    After collecting, trims back to the last indented line (function/class body).
+    This strips test assignments, prose, and comments that models append after the
+    solution while preserving module-level constants (CHUNK_SIZE = 10) that appear
+    before or between functions, since real code follows them.
+
+    Returns '' if the result contains no real code (no imports, defs, or @task).
+    """
+    bare_call = re.compile(r'^[A-Za-z_][\w.]*\s*\(')
+    result_lines = []
+    last_code_idx = -1
+    for line in code.splitlines():
+        stripped = line.strip()
+        if not line.startswith((' ', '\t')):
+            if stripped.startswith('if __name__'):
+                break
+            if stripped.startswith('<'):  # EOS/turn tokens from any model family
+                break
+            if stripped and bare_call.match(stripped) and '=' not in stripped.split('(')[0]:
+                continue
+        else:
+            last_code_idx = len(result_lines)  # indented lines anchor the trim point
+        result_lines.append(line)
+
+    if last_code_idx >= 0:
+        result_lines = result_lines[:last_code_idx + 1]
+
+    result = "\n".join(result_lines).strip()
+    if not re.search(r'^\s*(import|from|def)\s+|^\s*@', result, re.MULTILINE):
+        return ''
+    return result
+
+
+def clean_output(output: str, prompt: str) -> str:
+    """ 
+    Removes `prompt` from the beginning of `output`.
+    For C++/CUDA: Truncates at the matching closing brace.
+    For PyCOMPSs: Truncates after the 'main' function ends.
+    """
     prompt_loc = output.find(prompt)
     if prompt_loc == -1:
-        raise ValueError(f"Prompt not found in output: {prompt}")
-    output = output[prompt_loc + len(prompt):].strip()
+        raw_output = output
+    else:
+        raw_output = output[prompt_loc + len(prompt):].strip()
 
-    # temporarily add opening brace to the beginning
-    output = '{' + output
+    if _is_python_prompt(prompt):
+        return extract_pycompss_solution(raw_output)
 
-    # find the matching brace to output[0]
+    # Prepend '{' to simulate a complete function body and reuse brace-matching logic
+    cpp_output = '{' + raw_output
+
     stack = []
     index = 0
-    while index < len(output):
-        token = output[index]
+    while index < len(cpp_output):
+        token = cpp_output[index]
         if token == '{':
             stack.append(token)
         elif token == '}':
             stack.pop()
             if len(stack) == 0:
                 break
-
         index += 1
 
-    # truncate at the matching brace
-    output = output[1:index+1]
-    return output
+    # Strip the artificial opening brace before returning
+    return cpp_output[1:index+1]
 
 GPU_FUNCTION_NAME_PATTERN = re.compile(r"__global__ void ([a-zA-Z0-9_]+)\(")
 CPU_FUNCTION_NAME_PATTERN = re.compile(r"\s*[a-zA-Z_]+ ([a-zA-Z0-9_]+)\(")
@@ -66,50 +112,104 @@ def find_matching_brace_index(code: str, open_brace_index: int) -> int:
     raise ValueError("Unmatched opening brace")
 
 
-def clean_instruct_output(output: str, prompt: str, response_tag: str) -> str:
-    """ Clean LLM output to find code solution. The output should be in a ```c++ ``` code block. If there are
-        multiple, then it tries to find the block with the function definition (as contained in the prompt).
-        The code block itself may include the function definition and body OR just the body. This will try
-        to parse both.
+def extract_code_blocks(text: str) -> List[str]:
+    """Return the contents of fenced ``` code blocks, scanned line by line.
+
+    A line is a fence delimiter when its stripped form starts with ```. This
+    tolerates fences indented inside Markdown lists or quotes (reasoning models
+    routinely emit illustrative snippets that way), and content is dedented by
+    the opening fence's indent. A final unclosed fence (generation truncated
+    mid-block) is returned as the last block.
     """
-    # 0. replace up to the end of the first instance of prompt
+    blocks, current, indent = [], None, 0
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            if current is None:
+                current, indent = [], len(line) - len(line.lstrip())
+            else:
+                blocks.append("\n".join(current))
+                current = None
+        elif current is not None:
+            dedent = min(indent, len(line) - len(line.lstrip(" ")))
+            current.append(line[dedent:])
+    if current is not None:
+        blocks.append("\n".join(current))
+    # Drop empty blocks and stray closing ``` with no opener
+    return [b for b in blocks if b.strip()]
+
+
+def extract_pycompss_code(text: str) -> str:
+    """Select the PyCOMPSs solution from text that may contain fenced blocks.
+
+    For instruct/chat models whose answer is Markdown prose wrapping fenced code.
+    Note this is the wrong primitive for base-completion models, where the real
+    solution is the unfenced continuation and any later fence is usually junk, so
+    those use `extract_pycompss_solution` directly.
+    """
+    code_blocks = extract_code_blocks(text)
+    # Prefer blocks that contain Python code markers
+    python_blocks = [b for b in code_blocks if re.search(r'(@task|^\s*import\s|^\s*from\s|^\s*def\s)', b, flags=re.MULTILINE)]
+    if python_blocks:
+        # If block 0 already has def main it's self-contained; else concatenate fragments (applies to reasoning models with interleaved code and prose)
+        if re.search(r'^def main\b', python_blocks[0], re.MULTILINE):
+            return extract_pycompss_solution(python_blocks[0])
+        return extract_pycompss_solution("\n\n".join(python_blocks))
+    return extract_pycompss_solution(code_blocks[0] if code_blocks else text.strip())
+
+
+def clean_instruct_output(output: str, prompt: str, response_tag: str) -> str:
+    """ Clean LLM output to find code solution. """
+
+    # Strip thinking tokens emitted by reasoning models (e.g. DeepSeek-R1, Qwen3)
+    think_end = output.rfind('</think>')
+    if think_end != -1:
+        output = output[think_end + len('</think>'):].strip()
+    elif '<think>' in output:
+        # Thinking block was not closed (generation truncated mid-thought), no usable output
+        return ''
+
     prompt_loc = output.find(response_tag)
-    if prompt_loc == -1:
-        raise ValueError(f"Response tag {response_tag} not found in output: {prompt}")
-    output = output[prompt_loc + len(response_tag):].strip()
+    if prompt_loc != -1:
+        output = output[prompt_loc + len(response_tag):].strip()
 
-    # 1. Find all code blocks enclosed in triple backticks with "c++" language tag
-    code_blocks = re.findall(r"```\n(.*?)\n```", output, flags=re.DOTALL)
-    code_blocks = [block.removeprefix("```").removeprefix("cpp").removeprefix('c++').removesuffix('```') for block in code_blocks]
+    if _is_python_prompt(prompt):
+        return extract_pycompss_code(output)
 
-    # 2. Prioritize code blocks containing the function definition from the prompt
-    sub_prompt = prompt.rstrip().removesuffix(response_tag).rstrip().removesuffix("```").split("```")[-1]
-    function_name = get_function_name(sub_prompt, "cuda" if "__global__" in sub_prompt else "serial")
-    prioritized_blocks = [block for block in code_blocks if function_name in block]
+    # Extract fenced code blocks (```python, ```c++, plain ```). A lone unclosed
+    # fence becomes the final block, so truncated generations are covered too.
+    code_blocks = extract_code_blocks(output)
+    raw_code = code_blocks[0] if code_blocks else output.strip()
 
-    # 3. Choose the first block if multiple match, or any block if none match
-    if len(code_blocks) > 0:
-        selected_block = prioritized_blocks[0] if prioritized_blocks else code_blocks[0]
-    else:
-        if '```' in output: # starts with ```c++ but it didn't finish
-            code_idx = output.find('```')
-            selected_block = output[code_idx:].removeprefix('```')
-        else:
-            selected_block = output
+    try:
+        sub_prompt = prompt.rstrip().removesuffix(response_tag).rstrip()
+        if "```" in sub_prompt:
+             sub_prompt = sub_prompt.split("```")[-1]
 
-    # 4. Handle cases where the block contains only the function body
-    if function_name not in selected_block:
+        function_name = get_function_name(sub_prompt, "cuda" if "__global__" in sub_prompt else "serial")
+
+        selected_block = raw_code # Default
+        if len(code_blocks) > 0:
+            prioritized_blocks = [block for block in code_blocks if function_name in block]
+            if prioritized_blocks:
+                selected_block = prioritized_blocks[0]
+            else:
+                selected_block = code_blocks[0]
+
+        if function_name in selected_block:
+            function_start_index = selected_block.index(function_name)
+            open_brace_index = selected_block.find("{", function_start_index)
+
+            if open_brace_index != -1:
+                try:
+                    close_brace_index = find_matching_brace_index(selected_block, open_brace_index)
+                    return (selected_block[open_brace_index + 1 : close_brace_index] + "}").strip()
+                except ValueError:
+                    pass
+
         return selected_block
-    else:
-        function_start_index = selected_block.index(function_name)
-        open_brace_index = selected_block.find("{", function_start_index)
-        try:
-            close_brace_index = find_matching_brace_index(selected_block, open_brace_index)
-        except ValueError:
-            close_brace_index = len(selected_block)
 
-        function_body = selected_block[open_brace_index + 1 : close_brace_index]
-        return function_body + "}"
+    except ValueError:
+        return raw_code
 
 
 class InferenceConfig(ABC):
@@ -205,6 +305,48 @@ class CodeLlamaConfig(InferenceConfig):
     def clean_output(self, output: str, prompt: str) -> str:
         return clean_output(output, prompt)
 
+class Llama3InstructConfig(InferenceConfig):
+    """ Configuration for Llama 3 and 3.1 Instruct models """
+
+    PROMPT_TEMPLATE = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are an exceptionally intelligent coding assistant that consistently delivers accurate and reliable responses to user instructions.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{instruction}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+
+    def __init__(self, prompted : bool = False):
+        super().__init__(prompted=prompted)
+
+    def get_dtype(self):
+        return torch.bfloat16
+
+    def init_padding(self, tokenizer):
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer.padding_side = "left"
+
+    def get_pad_token_id(self, tokenizer) -> int:
+        return tokenizer.pad_token_id
+
+    def get_eos_token_id(self, tokenizer) -> int:
+        return tokenizer.eos_token_id
+    
+    def trust_remote_code(self) -> bool:
+        return False
+
+    def format_prompt(self, prompt : str) -> str:
+        if _is_python_prompt(prompt):
+            return self.PROMPT_TEMPLATE.format(instruction=prompt.strip())
+
+        function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
+        instruct_prompt = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
+        return self.PROMPT_TEMPLATE.format(instruction=instruct_prompt)
+
+    def clean_output(self, output: str, prompt: str) -> str:
+        return clean_instruct_output(output, prompt, "<|start_header_id|>assistant<|end_header_id|>\n\n")
+
+
 class PolyCoderConfig(InferenceConfig):
 
     def __init__(self, prompted : bool = False):
@@ -262,6 +404,14 @@ class PhindConfig(InferenceConfig):
         return prompt.strip()
 
     def clean_output(self, output: str, prompt: str) -> str:
+        # Phind-CodeLlama is instruction-tuned and answers with Markdown prose
+        # around fenced code, so strip the echoed prompt then use the fence-aware
+        # extractor rather than the base-completion path.
+        prompt_loc = output.find(prompt)
+        if prompt_loc != -1:
+            output = output[prompt_loc + len(prompt):]
+        if _is_python_prompt(prompt):
+            return extract_pycompss_code(output)
         return clean_output(output, prompt)
 
 
@@ -391,7 +541,11 @@ class InstructConfig(InferenceConfig):
     def trust_remote_code(self) -> bool:
         return False
 
-    def format_prompt(self, prompt : str) -> str:
+    def format_prompt(self, prompt: str) -> str:
+        if _is_python_prompt(prompt):
+            formatted = f"{self.instruction_tag}\n{prompt.strip()}\n{self.response_tag}\n"
+            return formatted
+
         function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
         prompt = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
         prompt = f"{self.instruction_tag}\n{prompt}\n{self.response_tag}\n"
@@ -448,14 +602,267 @@ class ChatMLConfig(InferenceConfig):
     def trust_remote_code(self) -> bool:
         return False
 
-    def format_prompt(self, prompt : str) -> str:
-        function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
-        prompt = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
-        prompt = f"<|im_start|>system\nYou are an exceptionally intelligent coding assistant that consistently delivers accurate and reliable responses to user instructions.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
-        return prompt
+    def format_prompt(self, prompt: str) -> str:
+        if _is_python_prompt(prompt):
+            instruction = prompt.strip()
+        else:
+            function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
+            instruction = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
+        return f"<|im_start|>system\nYou are an exceptionally intelligent coding assistant that consistently delivers accurate and reliable responses to user instructions.<|im_end|>\n<|im_start|>user\n{instruction}<|im_end|>\n<|im_start|>assistant\n"
 
     def clean_output(self, output: str, prompt: str) -> str:
         return clean_instruct_output(output, prompt,"<|im_start|>assistant\n")
+
+class MistralInstructConfig(InferenceConfig):
+    """Configuration for Mistral instruct models (Codestral, Mistral Small, etc.)"""
+
+    def __init__(self, prompted: bool = False):
+        super().__init__(prompted=prompted)
+
+    def get_dtype(self):
+        return torch.bfloat16
+
+    def init_padding(self, tokenizer):
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer.padding_side = "left"
+
+    def get_pad_token_id(self, tokenizer) -> int:
+        return tokenizer.pad_token_id
+
+    def get_eos_token_id(self, tokenizer) -> int:
+        return tokenizer.eos_token_id
+
+    def trust_remote_code(self) -> bool:
+        return False
+
+    def format_prompt(self, prompt: str) -> str:
+        if _is_python_prompt(prompt):
+            instruction = prompt.strip()
+        else:
+            function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
+            instruction = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
+        return f"<s>[INST] {instruction} [/INST]"
+
+    def clean_output(self, output: str, prompt: str) -> str:
+        # Some Mistral variants (e.g. Mistral-Small-3.2) prefix the actual answer
+        # with a `[OUT]` format token after [/INST]. Strip it if present.
+        inst_idx = output.find("[/INST]")
+        if inst_idx != -1:
+            after = output[inst_idx + len("[/INST]"):]
+            out_idx = after.find("[OUT]")
+            if out_idx != -1:
+                output = output[:inst_idx + len("[/INST]")] + after[out_idx + len("[OUT]"):]
+        return clean_instruct_output(output, prompt, "[/INST]")
+
+
+class DeepSeekR1Config(InferenceConfig):
+    """Configuration for DeepSeek-R1 distilled models (Llama and Qwen variants).
+    These models use DeepSeek's own User/Assistant tokens regardless of backbone architecture,
+    and always emit a <think>...</think> block before the answer."""
+
+    def __init__(self, prompted: bool = False):
+        super().__init__(prompted=prompted)
+
+    def get_dtype(self):
+        return torch.bfloat16
+
+    def init_padding(self, tokenizer):
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer.padding_side = "left"
+
+    def get_pad_token_id(self, tokenizer) -> int:
+        return tokenizer.pad_token_id
+
+    def get_eos_token_id(self, tokenizer) -> int:
+        return tokenizer.eos_token_id
+
+    def trust_remote_code(self) -> bool:
+        return False
+
+    def format_prompt(self, prompt: str) -> str:
+        if _is_python_prompt(prompt):
+            instruction = prompt.strip()
+        else:
+            function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
+            instruction = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
+        return f"<｜User｜>{instruction}<｜Assistant｜>"
+
+    def clean_output(self, output: str, prompt: str) -> str:
+        return clean_instruct_output(output, prompt, "<｜Assistant｜>")
+
+
+
+class HarmonyConfig(InferenceConfig):
+    """Configuration for OpenAI open-weight models using the Harmony chat format (e.g. gpt-oss-20b, gpt-oss-120b)."""
+
+    def __init__(self, prompted: bool = False):
+        super().__init__(prompted=prompted)
+
+    def get_dtype(self):
+        return torch.bfloat16
+
+    def init_padding(self, tokenizer):
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer.padding_side = "left"
+
+    def get_pad_token_id(self, tokenizer) -> int:
+        return tokenizer.pad_token_id
+
+    def get_eos_token_id(self, tokenizer) -> int:
+        return tokenizer.eos_token_id
+
+    def trust_remote_code(self) -> bool:
+        return False
+
+    def format_prompt(self, prompt: str) -> str:
+        if _is_python_prompt(prompt):
+            instruction = prompt.strip()
+        else:
+            function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
+            instruction = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
+        return f"<|start|>user<|message|>{instruction}<|end|>\n<|start|>assistant<|message|>"
+
+    def clean_output(self, output: str, prompt: str) -> str:
+        # gpt-oss models interleave internal reasoning between the assistant tag and the final answer.
+        # The actual response starts after the literal token 'assistantfinal'.
+        assistant_tag = "<|start|>assistant<|message|>"
+        assistant_idx = output.find(assistant_tag)
+        if assistant_idx != -1:
+            assistant_content = output[assistant_idx + len(assistant_tag):]
+            final_idx = assistant_content.find('assistantfinal')
+            if final_idx != -1:
+                output = assistant_tag + assistant_content[final_idx + len('assistantfinal'):]
+        return clean_instruct_output(output, prompt, assistant_tag)
+
+
+class GLM4Config(InferenceConfig):
+    """Configuration for ZhipuAI GLM-4 models (zai-org/GLM-*)."""
+
+    def __init__(self, prompted: bool = False):
+        super().__init__(prompted=prompted)
+
+    def get_dtype(self):
+        return torch.bfloat16
+
+    def init_padding(self, tokenizer):
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer.padding_side = "left"
+
+    def get_pad_token_id(self, tokenizer) -> int:
+        return tokenizer.pad_token_id
+
+    def get_eos_token_id(self, tokenizer) -> int:
+        return tokenizer.eos_token_id
+
+    def trust_remote_code(self) -> bool:
+        return False
+
+    def format_prompt(self, prompt: str) -> str:
+        if _is_python_prompt(prompt):
+            instruction = prompt.strip()
+        else:
+            function_name = get_function_name(prompt, "cuda" if "__global__" in prompt else "serial")
+            instruction = f"Complete the following c++ function.\n```c++{prompt.strip()}```\nWrite only the function {function_name} and no other code. Enclose your solution in ```c++ and ```."
+        return f"[gMASK]<sop><|user|>\n{instruction}\n<|assistant|>\n"
+
+    def clean_output(self, output: str, prompt: str) -> str:
+        return clean_instruct_output(output, prompt, "<|assistant|>\n")
+
+
+SHORT_OUTPUT_THRESHOLD = 30  # chars; cleaned outputs shorter than this are flagged
+
+
+def check_output_integrity(responses: List[dict], extra_counters: dict = None) -> dict:
+    """Check generated outputs for integrity issues and print a summary report.
+
+    Checks performed on raw_outputs / outputs:
+    - truncated_think   : <think> opened but never closed (generation ran out of tokens)
+    - unclosed_fence    : odd number of ``` markers (code block not closed)
+    - empty_output      : cleaned output is empty string
+    - short_output      : cleaned output shorter than SHORT_OUTPUT_THRESHOLD chars
+    - no_code_structure : pycompss output lacks @task/def; C++ output lacks {
+    - identical_samples : all N samples for a prompt are the same (degenerate generation)
+
+    extra_counters: optional dict of additional pre-computed counters to include
+    in the report (e.g. {'truncated_by_length': 12} from vLLM finish_reason).
+    """
+    stats = {
+        'truncated_think': 0,
+        'unclosed_fence': 0,
+        'empty_output': 0,
+        'short_output': 0,
+        'no_code_structure': 0,
+        'identical_samples': 0,
+    }
+    # Map issue_key -> {prompt_name -> [sample indices]}
+    details: dict = {k: {} for k in stats}
+
+    def _record(key, name, sample_idx):
+        stats[key] += 1
+        details[key].setdefault(name, []).append(sample_idx)
+
+    for r in responses:
+        name = r.get('name', r.get('prompt', '')[:40])
+        outputs = r.get('outputs', [])
+        raw_outputs = r.get('raw_outputs', [])
+        is_python = _is_python_prompt(r.get('prompt', ''))
+
+        for idx, (raw, out) in enumerate(zip(raw_outputs, outputs)):
+            if '<think>' in raw and '</think>' not in raw:
+                _record('truncated_think', name, idx)
+            if raw.count('```') % 2 != 0:
+                _record('unclosed_fence', name, idx)
+            stripped = out.strip()
+            if not stripped:
+                _record('empty_output', name, idx)
+            elif len(stripped) < SHORT_OUTPUT_THRESHOLD:
+                _record('short_output', name, idx)
+            if stripped:
+                if is_python and '@task' not in out and 'def ' not in out:
+                    _record('no_code_structure', name, idx)
+                elif not is_python and '{' not in out:
+                    _record('no_code_structure', name, idx)
+
+        if len(outputs) > 1 and len(set(outputs)) == 1:
+            _record('identical_samples', name, -1)
+
+    total_entries = len(responses)
+    total_samples = sum(len(r.get('outputs', [])) for r in responses)
+
+    print(f"\n{'='*40}")
+    print(f"Output Integrity Report")
+    print(f"  Entries: {total_entries} | Samples: {total_samples}")
+
+    def _fmt_detail(key):
+        """Return indented lines listing prompt -> sample indices for one issue."""
+        lines = []
+        for prompt_name, indices in details[key].items():
+            if indices == [-1]:
+                lines.append(f"      {prompt_name}")
+            else:
+                samples_str = ', '.join(str(i) for i in indices)
+                lines.append(f"      {prompt_name}  [samples: {samples_str}]")
+        return lines
+
+    if extra_counters:
+        for key, val in extra_counters.items():
+            label = key.replace('_', ' ').capitalize()
+            flag = ' !!!' if val > 0 else ''
+            print(f"  {label}: {val}{flag}")
+
+    issues = {k: v for k, v in stats.items() if v > 0}
+    if not issues:
+        print("  No issues detected.")
+    else:
+        for key, val in issues.items():
+            label = key.replace('_', ' ').capitalize()
+            print(f"  {label}: {val} !!!")
+            for line in _fmt_detail(key):
+                print(line)
+    print(f"{'='*40}\n")
+
+    return {**stats, **(extra_counters or {})}
+
 
 def get_inference_config(model_name : str, **kwargs) -> InferenceConfig:
     if model_name == "bigcode/starcoderbase":
@@ -472,7 +879,9 @@ def get_inference_config(model_name : str, **kwargs) -> InferenceConfig:
         return ReplitConfig(**kwargs)
     elif model_name.startswith('ise-uiuc/Magicoder'):
         return MagicoderConfig(**kwargs)
-    elif model_name in ['deepseek-ai/deepseek-coder-6.7b-base', 'deepseek-ai/deepseek-coder-7b-base-v1.5']:
+    elif model_name == 'deepseek-ai/deepseek-coder-6.7b-instruct':
+        return InstructConfig(instruction_tag='### Instruction:', response_tag='### Response:', **kwargs)
+    elif model_name.startswith('deepseek-ai/') and 'Instruct' not in model_name and 'R1' not in model_name:
         return DeepSeekBaseConfig(**kwargs)
     elif model_name.startswith('hpcgroup/hpc-coder-v2'):
         return InstructConfig(instruction_tag='Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:', response_tag='### Response:', **kwargs)
@@ -484,6 +893,38 @@ def get_inference_config(model_name : str, **kwargs) -> InferenceConfig:
         return ChatMLConfig(**kwargs)
     elif model_name.startswith('Qwen/Qwen2.5'):
         return QwenConfig(**kwargs)
+    elif ('Llama-3.1' in model_name or 'Llama-3.3' in model_name) and 'Instruct' in model_name:
+        return Llama3InstructConfig(**kwargs)
+    elif 'DeepSeek-R1' in model_name:
+        # Covers DeepSeek-R1, DeepSeek-R1-0528, and all DeepSeek-R1-Distill-* variants
+        return DeepSeekR1Config(**kwargs)
+    elif model_name == 'deepseek-ai/DeepSeek-Coder-V2-Instruct':
+        return InstructConfig(instruction_tag='User:', response_tag='Assistant:', **kwargs)
+    elif model_name.startswith('mistralai/Codestral') \
+            or ('Mistral-Small' in model_name and 'Instruct' in model_name) \
+            or ('Mixtral' in model_name and 'Instruct' in model_name) \
+            or 'Magistral' in model_name:
+        return MistralInstructConfig(**kwargs)
+    elif model_name.startswith('openai/gpt-oss'):
+        return HarmonyConfig(**kwargs)
+    # Qwen3 loaded from a 3-level local path (org prefix stripped by path parser)
+    elif model_name.startswith('Qwen3/'):
+        return ChatMLConfig(**kwargs)
+    # Qwen2.5 loaded from a 3-level local path (org prefix stripped by path parser)
+    elif model_name.startswith('Qwen2.5/') and 'Instruct' in model_name:
+        return ChatMLConfig(**kwargs)
+    elif model_name.startswith('Qwen2.5/'):
+        return QwenConfig(**kwargs)
+    elif model_name.startswith('microsoft/bitnet'):
+        # Base completion model, no chat template
+        return StarCoderConfig(**kwargs)
+    elif model_name.startswith('zai-org/GLM'):
+        return GLM4Config(**kwargs)
+    elif model_name.startswith('moonshotai/Kimi'):
+        return ChatMLConfig(**kwargs)
+    elif model_name.startswith('ByteDance-Seed/Seed-OSS'):
+        # NOTE: chat template not officially documented; ChatML assumed, verify if wrong
+        return ChatMLConfig(**kwargs)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -499,8 +940,11 @@ class PromptDataset(Dataset):
     def __len__(self):
         return len(self.prompts_)
     
-    def __getitem__(self, idx): 
+    def __getitem__(self, idx):
         return self.prompts_[idx]
+
+    def __iter__(self):
+        return iter(self.prompts_)
 
 
 def has_balanced_brackets(text : str, left_bracket : str = '{', right_bracket : str = '}') -> bool:

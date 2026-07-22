@@ -19,50 +19,22 @@ of the generated outputs using the below command.
 ```sh
 python run-all.py generated-outputs.json
 
-# usage: run-all.py [-h] [-o OUTPUT] [--scratch-dir SCRATCH_DIR] [--save-generated DIR] [--launch-configs LAUNCH_CONFIGS] [--problem-sizes PROBLEM_SIZES] [--yes-to-all]
-#                   [--dry] [--overwrite] [--hide-progress]
-#                   [--exclude-models {serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} [{serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} ...] | --include-models
-#                   {serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} [{serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} ...]]
-#                   [--problem PROBLEM | --problem-type PROBLEM_TYPE] [--early-exit-runs] [--build-timeout BUILD_TIMEOUT] [--run-timeout RUN_TIMEOUT]
-#                   [--log {INFO,DEBUG,WARNING,ERROR,CRITICAL}] [--log-build-errors] [--log-runs]
-#                   input_json
-# 
-# Run all the generated code.
-# 
-# positional arguments:
-#   input_json            Input JSON file containing the test cases.
-# 
-# optional arguments:
-#   -h, --help            show this help message and exit
-#   -o OUTPUT, --output OUTPUT
-#                         Output JSON file containing the results.
-#   --scratch-dir SCRATCH_DIR
-#                         If provided, put scratch files here.
-#   --save-generated DIR   If provided, save each generated source code file to this directory.
-#   --launch-configs LAUNCH_CONFIGS
-#                         config for how to run samples.
-#   --problem-sizes PROBLEM_SIZES
-#                         config for how to run samples.
-#   --yes-to-all          If provided, automatically answer yes to all prompts.
-#   --dry                 Dry run. Do not actually run the code snippets.
-#   --overwrite           If ouputs are already in DB for a given prompt, then overwrite them. Default behavior is to skip existing results.
-#   --hide-progress       If provided, do not show progress bar.
-#   --exclude-models {serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} [{serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} ...]
-#                         Exclude the given parallelism models from testing.
-#   --include-models {serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} [{serial,omp,mpi,mpi+omp,kokkos,cuda,hip,pycompss} ...]
-#                         Only test the given parallelism models.
-#   --problem PROBLEM     Only test this probem if provided.
-#   --problem-type PROBLEM_TYPE
-#                         Only test problems of this type if provided.
-#   --early-exit-runs     If provided, stop evaluating a model output after the first run configuration fails.
-#   --build-timeout BUILD_TIMEOUT
-#                         Timeout in seconds for building a program.
-#   --run-timeout RUN_TIMEOUT
-#                         Timeout in seconds for running a program.
-#   --log {INFO,DEBUG,WARNING,ERROR,CRITICAL}
-#                         logging level
-#   --log-build-errors    On build error, display the stderr of the build process.
-#   --log-runs            Display the stderr and stdout of runs.
+# Run each generated output against its test harness. Run with --help for the
+# full list of arguments. The most commonly used ones:
+#
+#   input_json            Input JSON file containing the test cases (positional).
+#   -o, --output          Output JSON file for the results.
+#   --artifacts-dir DIR   Save per-output artifacts (raw code + merged executable).
+#   --scratch-dir DIR     Parent for temp build/run dirs (auto-deleted).
+#   --launch-configs      JSON config for how to launch samples.
+#   --build-configs       JSON config for how to build samples.
+#   --problem-sizes       JSON config for per-problem sizes.
+#   --relaxations ...     Apply source-code relaxations on failure, then retry
+#                         ('all' or specific names). Off by default.
+#   --include-models / --exclude-models   Restrict to / skip parallelism models.
+#   --problem / --problem-type            Restrict to one problem or type.
+#   --resume              Load an existing output file and skip evaluated entries.
+#   --dry                 Do not actually run the code snippets.
 ```
 
 The launch configurations (node counts and launch commands) are defined in a
@@ -81,8 +53,17 @@ To solve this you can set `--scratch-dir` to point to a scratch directory
 on a shared file system.
 
 If you want to keep a copy of each generated source file (normally written to a
-temporary directory and deleted), pass `--save-generated <DIR>`. Files will be
-saved under `<DIR>/<problem_type>/<problem_name>/<model>_<index>.<ext>`.
+temporary directory and deleted), pass `--artifacts-dir <DIR>`. Files are saved
+under `<DIR>/<problem_type>/<problem_name>_<index>/`.
+
+## Running all models
+
+`run-all-models.sh` wraps `run-all.py` to evaluate every model, looping over the
+`output-*.json` files in `../generate/outputs/<dir>/` and writing
+`outputs/<dir>/output_drivers_<model>.json`, skipping models already done. The
+`run-all-models-slurm*.sh` variants run the same thing as SLURM job arrays (one
+task per model), including a `-scaling` variant for the scaling runs. See the
+header of each script for its arguments.
 
 ## Organization of Drivers
 Within `drivers/` there are subdirectories for each programming language. In

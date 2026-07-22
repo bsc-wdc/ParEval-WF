@@ -1,7 +1,10 @@
 # Generate
 
 This subdirectory contains scripts for generating the LLM outputs for ParEval.
-The main script is `generate.py`. It can be run as follows.
+There are a few interchangeable inference engines that share the same arguments:
+`generate-vllm.py` (vLLM, the primary engine on the cluster), `generate.py`
+(HuggingFace transformers), and `generate-openai.py` / `generate-gemini.py` for
+hosted APIs. The `generate.py` arguments are shown below as a reference.
 
 ```sh
 usage: generate.py [-h] --prompts PROMPTS --model MODEL --output OUTPUT [--restart] [--cache CACHE] [--restore_from RESTORE_FROM] [--max_new_tokens MAX_NEW_TOKENS]
@@ -26,7 +29,7 @@ optional arguments:
   --temperature TEMPERATURE
                         Temperature for controlling randomness (default: 0.2)
   --top_p TOP_P         Top p value for nucleus sampling (default: 0.95)
-  --do_sample           Enable sampling (default: False)
+  --do_sample           Enable sampling (default: True; use --no_do_sample for greedy)
   --batch_size BATCH_SIZE
                         Batch size for generation (default: 8)
   --prompted            Use prompted generation. See StarCoder paper (default: False)
@@ -43,6 +46,13 @@ handle of a HuggingFace model. The cache and restart arguments can be used to
 restart from existing outputs. The `--prompted` flag will append _solution_
 comments to the front of the prompt as in the StarCoder paper. You likely want
 this turned on as it almost always improves the results.
+
+## Running all models
+
+`generate-all.sh` is a SLURM batch script that runs every model listed in
+`models.txt` over a prompt set, writing `outputs/<dir>/output-<model>.json` and
+skipping models whose output already exists. `generate-all-api.sh` does the same
+for the API models. See the header of each script for its arguments.
 
 ## Adding New LLMs
 
